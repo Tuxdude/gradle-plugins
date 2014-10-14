@@ -3,3 +3,9 @@ build/
 
 # Ignore Gradle GUI config
 gradle-app.setting
+
+# Vim swap files
+*.swp
+
+# OSX files
+*.DS_Store
