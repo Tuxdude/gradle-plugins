@@ -17,32 +17,69 @@
  *  limitations under the License.
  */
 
-apply plugin: 'maven'
 
+// Determine if the project has applied either the java plugin or
+// the android plugin
+ext.isJavaProject = project.getPlugins().hasPlugin('java')
+ext.isAndroidLibraryProject =
+    project.getPlugins().hasPlugin('com.android.library') ||
+    project.getPlugins().hasPlugin('android-library')
+
+if (isAndroidLibraryProject) {
+    println "Found android library plugin in the project"
+}
+else if (isJavaProject) {
+    println "Found java plugin in the project"
+}
+
+if (!isAndroidLibraryProject && !isJavaProject) {
+    throw new InvalidUserDataException(
+        "'com.android.library' or 'android-library' plugin was found, not a Android Project ??")
+}
+
+// Declare a dependency configuration for pulling doclava jar
+configurations {
+    javadocDoclet
+}
+dependencies {
+    javadocDoclet("com.google.doclava:doclava:1.0.6")
+}
+
+// Returns if the build version is actually a release version
 def isReleaseVersion() {
     return !version.endsWith("SNAPSHOT")
 }
 
+// Returns if the build needs to be signed
 def isSigningRequired() {
     return isReleaseVersion()
 }
 
+// Return the filename containing the property for maven signing
 def getMavenSigningPropertiesFilename() {
     return "$rootDir/maven-signing.properties"
 }
 
+// Return the name of the property which stores the filename and path
+// of the maven signing information
 def getMavenSigningConfigProperty() {
     return "maven-signing-config"
 }
 
+// Return the filename containing the property for Sonatype OSSRH
+// credentials
 def getSonatypeOssrhPropertiesFilename() {
     return "$rootDir/sonatype-ossrh.properties"
 }
 
+// Return the name of the property which stores the filename and path
+// of the Sonatype OSSRH credentials
 def getSonatypeOssrhConfigProperty() {
     return "sonatype-ossrh-config"
 }
 
+// Helper method to return the properties stored in a file which
+// points to another file (containing the properties)
 def getLinkedProperties(String linkedFilename, String propertyName) {
     Properties returnProperties = null
     File linkFile = new File(linkedFilename)
@@ -61,24 +98,17 @@ def getLinkedProperties(String linkedFilename, String propertyName) {
     return returnProperties
 }
 
+// Get the maven signing related properties
 def getSigningProperties() {
     return getLinkedProperties(getMavenSigningPropertiesFilename(), getMavenSigningConfigProperty())
 }
 
+// Get the Sonatype OSSRH credential properties
 def getSonatypeOssrhProperties() {
     return getLinkedProperties(getSonatypeOssrhPropertiesFilename(), getSonatypeOssrhConfigProperty())
 }
 
-// GRADLE-1285 - workaround to get <packaging>jar</packaging>
-//               into the pom file
-def pomPackagingElement = { root ->
-    if (POM_PACKAGING.equalsIgnoreCase("jar")) {
-        def children = root.asNode().children()
-        def versionIndex = children.indexOf(children.find {it.name().localPart == 'version'})
-        children.add(versionIndex + 1, new Node(null, 'packaging', POM_PACKAGING))
-    }
-}
-
+// Get the repository URL
 ext.getRepositoryUrl = { Boolean isSnapshot ->
     String url = null
     if (isSnapshot) {
@@ -90,6 +120,7 @@ ext.getRepositoryUrl = { Boolean isSnapshot ->
     return url
 }
 
+// Get the repository username
 ext.getRepositoryUsername = { Boolean isSnapshot ->
     if (ext.useSonatypeOssrhCredentials) {
         return ext.ossrhUsername
@@ -99,6 +130,7 @@ ext.getRepositoryUsername = { Boolean isSnapshot ->
     }
 }
 
+// Get the repository password
 ext.getRepositoryPassword = { Boolean isSnapshot ->
     if (ext.useSonatypeOssrhCredentials) {
         return ext.ossrhPassword
@@ -108,6 +140,22 @@ ext.getRepositoryPassword = { Boolean isSnapshot ->
     }
 }
 
+apply plugin: 'maven'
+apply plugin: 'signing'
+
+// GRADLE-1285 - workaround to get <packaging>jar</packaging>
+//               into the pom file
+def pomPackagingElement = { root ->
+    if (POM_PACKAGING.equalsIgnoreCase("jar")) {
+        def children = root.asNode().children()
+        def versionIndex = children.indexOf(children.find {it.name().localPart == 'version'})
+        children.add(versionIndex + 1, new Node(null, 'packaging', POM_PACKAGING))
+    }
+}
+
+// Configure the mavenDeployer
+// Repository details can only be retrieved in afterEvaluate since
+// it needs the signing and credential information
 afterEvaluate { project ->
     uploadArchives {
         repositories {
@@ -133,6 +181,7 @@ afterEvaluate { project ->
     }
 }
 
+// Configure the mavenDeployer
 uploadArchives {
     repositories {
         mavenDeployer {
@@ -182,22 +231,89 @@ uploadArchives {
     }
 }
 
+afterEvaluate { project ->
+    if (isAndroidLibraryProject) {
+        // Task to generate android sources jar
+        task allSourcesJar(type: Jar) {
+            description "Builds Android Source jar artifact suitable for maven deployment"
+            classifier = 'sources'
+            from android.sourceSets.main.java.sourceFiles
+        }
 
-task javadocJar(type: Jar, dependsOn: javadoc) {
-    description = 'Builds a javadoc jar artifact suitable for maven deployment'
-    classifier = 'javadoc'
-    from javadoc.destinationDir
+        // Task to generate android javadoc jar
+        task javadocJar(type: Jar, dependsOn: generateJavadocRelease) {
+            description "Builds Android Javadoc jar artifact suitable for maven deployment"
+            classifier = "javadoc"
+            from generateJavadocRelease.destinationDir
+        }
+    }
+    else {
+        // Task to generate a sources jar
+        task allSourcesJar(type: Jar) {
+            description = 'Builds a source jar artifact suitable for maven deployment'
+            classifier = 'sources'
+            from sourceSets.main.allSource
+        }
+
+        // Configure the javadoc generation using doclava
+        configure(javadoc) {
+            options.docletpath = configurations.javadocDoclet.files.asType(List)
+            options.doclet = "com.google.doclava.Doclava"
+            title = null
+            options {
+                addStringOption "hdf project.name", POM_NAME
+                addStringOption "federate JDK", "http://download.oracle.com/javase/6/docs/api/index.html?"
+                addStringOption "federationxml JDK", "http://doclava.googlecode.com/svn/static/api/openjdk-6.xml"
+            }
+            failOnError true
+        }
+
+        // Task to generate a javadoc jar
+        task javadocJar(type: Jar, dependsOn: javadoc) {
+            description = 'Builds a javadoc jar artifact suitable for maven deployment'
+            classifier = 'javadoc'
+            from javadoc.destinationDir
+        }
+    }
+
+    // List of all artifacts to be published
+    artifacts {
+        archives allSourcesJar
+        archives javadocJar
+    }
 }
 
-task allSourcesJar(type: Jar) {
-    description = 'Builds a source jar artifact suitable for maven deployment'
-    classifier = 'sources'
-    from sourceSets.main.allSource
-}
+if (isAndroidLibraryProject) {
+    android.libraryVariants.all { variant ->
+        if (variant.buildType.name.equalsIgnoreCase("debug")) {
+            return; // Skip debug builds.
+        }
 
-artifacts {
-    archives allSourcesJar
-    archives javadocJar
+        def name = variant.name.capitalize()
+
+        // Task to configure the android javadoc generation using doclava
+        task("generateJavadoc$name", type: Javadoc, dependsOn: "assemble$name") {
+            description "Generates Javadoc for $variant.name."
+            destinationDir = new File(destinationDir, variant.baseName)
+            source = files(variant.javaCompile.source)
+            classpath = files(
+                plugins.findPlugin("com.android.library").getBootClasspath(),
+                variant.javaCompile.classpath)
+            options.docletpath = configurations.javadocDoclet.files.asType(List)
+            options.doclet = "com.google.doclava.Doclava"
+            title = null
+            options {
+                addStringOption "hdf project.name", POM_NAME
+                addStringOption "federate JDK", "http://download.oracle.com/javase/6/docs/api/index.html?"
+                addStringOption "federationxml JDK", "http://doclava.googlecode.com/svn/static/api/openjdk-6.xml"
+                addStringOption "federate android", "http://d.android.com/reference"
+                addStringOption "federationxml android", "$rootDir/android-19.xml"
+            }
+            exclude '**/BuildConfig.java'
+            exclude '**/R.java'
+            failOnError true
+        }
+    }
 }
 
 // Disable using Sonatype OSSRH Credentials by default
